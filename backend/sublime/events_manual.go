@@ -1,11 +1,16 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package sublime
 
 import (
-	"code.google.com/p/log4go"
 	"fmt"
-	"github.com/quarnster/util/text" //"time"
-	"lime/3rdparty/libs/gopy/lib"
-	"lime/backend"
+	"github.com/limetext/gopy/lib"
+	"github.com/limetext/lime/backend"
+	"github.com/limetext/lime/backend/log"
+	"github.com/limetext/lime/backend/util"
+	"github.com/limetext/text"
 )
 
 var (
@@ -36,13 +41,16 @@ type (
 )
 
 var evmap = map[string]*backend.ViewEvent{
-	"on_modified":    &backend.OnModified,
-	"on_activated":   &backend.OnActivated,
-	"on_deactivated": &backend.OnDeactivated,
-	"on_load":        &backend.OnLoad,
-	"on_new":         &backend.OnNew,
-	"on_pre_save":    &backend.OnPreSave,
-	"on_post_save":   &backend.OnPostSave,
+	"on_new":                &backend.OnNew,
+	"on_load":               &backend.OnLoad,
+	"on_activated":          &backend.OnActivated,
+	"on_deactivated":        &backend.OnDeactivated,
+	"on_pre_close":          &backend.OnPreClose,
+	"on_close":              &backend.OnClose,
+	"on_pre_save":           &backend.OnPreSave,
+	"on_post_save":          &backend.OnPostSave,
+	"on_modified":           &backend.OnModified,
+	"on_selection_modified": &backend.OnSelectionModified,
 }
 
 func (c *ViewEventGlue) PyInit(args *py.Tuple, kwds *py.Dict) error {
@@ -73,25 +81,25 @@ func (c *ViewEventGlue) PyInit(args *py.Tuple, kwds *py.Dict) error {
 func (c *ViewEventGlue) onEvent(v *backend.View) {
 	l := py.NewLock()
 	defer l.Unlock()
-	if pv, err := toPython(v); err != nil {
-		log4go.Error(err)
-	} else {
-		defer pv.Decref()
-		log4go.Fine("onEvent: %v, %v, %v", c, c.inner, pv)
-		// interrupt := true
-		// defer func() { interrupt = false }()
-		// go func() {
-		// 	<-time.After(time.Second * 5)
-		// 	if interrupt {
-		// 		py.SetInterrupt()
-		// 	}
-		// }()
+	pv, err := toPython(v)
+	if err != nil {
+		log.Error(err)
+	}
+	defer pv.Decref()
+	log.Fine("onEvent: %v, %v, %v", c, c.inner, pv)
+	// interrupt := true
+	// defer func() { interrupt = false }()
+	// go func() {
+	// 	<-time.After(time.Second * 5)
+	// 	if interrupt {
+	// 		py.SetInterrupt()
+	// 	}
+	// }()
 
-		if ret, err := c.inner.Base().CallFunctionObjArgs(pv); err != nil {
-			log4go.Error(err)
-		} else if ret != nil {
-			ret.Decref()
-		}
+	if ret, err := c.inner.Base().CallFunctionObjArgs(pv); err != nil {
+		log.Error(err)
+	} else if ret != nil {
+		ret.Decref()
 	}
 }
 
@@ -111,7 +119,7 @@ func (c *OnQueryContextGlue) PyInit(args *py.Tuple, kwds *py.Dict) error {
 	return nil
 }
 
-func (c *OnQueryContextGlue) onQueryContext(v *backend.View, key string, operator backend.Op, operand interface{}, match_all bool) backend.QueryContextReturn {
+func (c *OnQueryContextGlue) onQueryContext(v *backend.View, key string, operator util.Op, operand interface{}, match_all bool) backend.QueryContextReturn {
 	l := py.NewLock()
 	defer l.Unlock()
 
@@ -120,31 +128,31 @@ func (c *OnQueryContextGlue) onQueryContext(v *backend.View, key string, operato
 		err                      error
 	)
 	if pv, err = toPython(v); err != nil {
-		log4go.Error(err)
+		log.Error(err)
 		return backend.Unknown
 	}
 	defer pv.Decref()
 
 	if pk, err = toPython(key); err != nil {
-		log4go.Error(err)
+		log.Error(err)
 		return backend.Unknown
 	}
 	defer pk.Decref()
 
 	if po, err = toPython(operator); err != nil {
-		log4go.Error(err)
+		log.Error(err)
 		return backend.Unknown
 	}
 	defer po.Decref()
 
 	if poa, err = toPython(operand); err != nil {
-		log4go.Error(err)
+		log.Error(err)
 		return backend.Unknown
 	}
 	defer poa.Decref()
 
 	if pm, err = toPython(match_all); err != nil {
-		log4go.Error(err)
+		log.Error(err)
 		return backend.Unknown
 	}
 	defer pm.Decref()
@@ -158,13 +166,13 @@ func (c *OnQueryContextGlue) onQueryContext(v *backend.View, key string, operato
 	// }()
 
 	if ret, err = c.inner.Base().CallFunctionObjArgs(pv, pk, po, poa, pm); err != nil {
-		log4go.Error(err)
+		log.Error(err)
 		return backend.Unknown
 	}
 	defer ret.Decref()
 
 	//	if ret != nil {
-	log4go.Fine("onQueryContext: %v, %v", pv, ret.Base())
+	log.Fine("onQueryContext: %v, %v", pv, ret.Base())
 	if r2, ok := ret.(*py.Bool); ok {
 		if r2.Bool() {
 			return backend.True
@@ -172,7 +180,7 @@ func (c *OnQueryContextGlue) onQueryContext(v *backend.View, key string, operato
 			return backend.False
 		}
 	} else {
-		log4go.Fine("other: %v", ret)
+		log.Fine("other: %v", ret)
 	}
 	return backend.Unknown
 }

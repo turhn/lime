@@ -1,26 +1,52 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package sublime
 
 import (
 	"bytes"
-	"code.google.com/p/log4go"
 	"fmt"
-	"github.com/quarnster/completion/util"
-	"github.com/quarnster/util/text"
+	"github.com/limetext/gopy/lib"
+	"github.com/limetext/lime/backend"
+	_ "github.com/limetext/lime/backend/commands"
+	"github.com/limetext/lime/backend/log"
+	"github.com/limetext/lime/backend/packages"
+	"github.com/limetext/lime/backend/util"
+	"github.com/limetext/text"
 	"io/ioutil"
-	"lime/3rdparty/libs/gopy/lib"
-	"lime/backend"
-	_ "lime/backend/commands"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+var dummyClipboard string
+
+type consoleObserver struct {
+	T *testing.T
+}
+
+func (o *consoleObserver) Erased(changed_buffer text.Buffer, region_removed text.Region, data_removed []rune) {
+	// do nothing
+}
+
+func (o *consoleObserver) Inserted(changed_buffer text.Buffer, region_inserted text.Region, data_inserted []rune) {
+	o.T.Logf("%s", string(data_inserted))
+}
 
 func TestSublime(t *testing.T) {
 	ed := backend.GetEditor()
-	ed.Console().Buffer().AddCallback(func(b text.Buffer, pos, delta int) {
-		t.Logf("%s", b.Substr(text.Region{pos, pos + delta}))
+	ed.SetClipboardFuncs(func(n string) (err error) {
+		dummyClipboard = n
+		return nil
+	}, func() (string, error) {
+		return dummyClipboard, nil
 	})
+	defer ed.Init()
+
+	ed.Console().Buffer().AddObserver(&consoleObserver{T: t})
 	w := ed.NewWindow()
 	Init()
 	l := py.NewLock()
@@ -29,7 +55,14 @@ func TestSublime(t *testing.T) {
 	if m, err := py.Import("sublime_plugin"); err != nil {
 		t.Fatal(err)
 	} else {
-		scanpath("testdata/", m)
+		plugins := packages.ScanPlugins("testdata/", ".py")
+		for _, p := range plugins {
+			pl := newPlugin(p, m)
+			pl.loadPlugin()
+			if err := watcher.Watch(pl.Name(), pl); err != nil {
+				t.Fatalf("Couldn't watch %s: %s", pl.Name(), err)
+			}
+		}
 	}
 
 	subl, err := py.Import("sublime")
@@ -44,19 +77,19 @@ func TestSublime(t *testing.T) {
 		subl.AddObject("test_window", w)
 	}
 
-	og, err := py.Import("objgraph")
-	if err != nil {
-		log4go.Debug(err)
-		return
-	}
-	gr, err := og.Dict().GetItemString("show_growth")
-	if err != nil {
-		log4go.Debug(err)
-		return
-	}
+	// Testing plugin reload
+	data := []byte(`import sublime, sublime_plugin
 
-	log4go.Debug("Before")
-	gr.Base().CallFunctionObjArgs()
+class TestToxt(sublime_plugin.TextCommand):
+    def run(self, edit):
+        print("my view's id is: %d" % self.view.id())
+        self.view.insert(edit, 0, "Tada")
+		`)
+	if err := ioutil.WriteFile("testdata/plugins/reload.py", data, 0644); err != nil {
+		t.Fatalf("Couldn't write testdata/plugins/reload.py: %s", err)
+	}
+	defer os.Remove("testdata/plugins/reload.py")
+	time.Sleep(time.Millisecond * 50)
 
 	if dir, err := os.Open("testdata"); err != nil {
 		t.Error(err)
@@ -65,12 +98,12 @@ func TestSublime(t *testing.T) {
 	} else {
 		for _, fn := range files {
 			if filepath.Ext(fn) == ".py" {
-				log4go.Debug("Running %s", fn)
+				log.Debug("Running %s", fn)
 				if _, err := py.Import(fn[:len(fn)-3]); err != nil {
-					log4go.Error(err)
+					log.Error(err)
 					t.Error(err)
 				} else {
-					log4go.Debug("Ran %s", fn)
+					log.Debug("Ran %s", fn)
 				}
 			}
 		}
@@ -149,10 +182,6 @@ func TestSublime(t *testing.T) {
 			}
 		}
 	}
-	log4go.Debug("After")
-	l.Lock()
-	gr.Base().CallFunctionObjArgs()
-	l.Unlock()
 
 	var v *backend.View
 	for _, v2 := range w.Views() {
@@ -160,17 +189,4 @@ func TestSublime(t *testing.T) {
 			v = v2
 		}
 	}
-
-	// log4go.Debug("Before")
-	// gr.Base().CallFunctionObjArgs()
-	// for i := 0; i < 500; i++ {
-	// 	ed.CommandHandler().RunTextCommand(v, "set_motion", backend.Args{"motion": "vi_j"})
-	// }
-	// for i := 0; i < 500; i++ {
-	// 	ed.CommandHandler().RunTextCommand(v, "set_motion", backend.Args{"motion": "vi_k"})
-	// }
-
-	// log4go.Debug("After")
-	// gr.Base().CallFunctionObjArgs()
-
 }

@@ -1,12 +1,37 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package textmate
 
 import (
 	"fmt"
-	"github.com/quarnster/completion/util"
+	"github.com/limetext/lime/backend/util"
 	"io/ioutil"
-	lu "lime/backend/util"
 	"testing"
 )
+
+func TestLanguageProviderLanguageFromScope(t *testing.T) {
+	l, _ := Provider.LanguageFromFile("testdata/Go.tmLanguage")
+
+	if _, err := Provider.LanguageFromScope(l.ScopeName); err != nil {
+		t.Errorf("Tried to load %s, but got an error: %v", l.ScopeName, err)
+	}
+
+	if _, err := Provider.LanguageFromScope("MissingScope"); err == nil {
+		t.Error("Tried to load MissingScope, expecting to get an error, but didn't")
+	}
+}
+
+func TestLanguageProviderLanguageFromFile(t *testing.T) {
+	if _, err := Provider.LanguageFromFile("testdata/Go.tmLanguage"); err != nil {
+		t.Errorf("Tried to load testdata/Go.tmLanguage, but got an error: %v", err)
+	}
+
+	if _, err := Provider.LanguageFromFile("MissingFile"); err == nil {
+		t.Error("Tried to load MissingFile, expecting to get an error, but didn't")
+	}
+}
 
 func TestTmLanguage(t *testing.T) {
 	files := []string{
@@ -107,6 +132,5 @@ func BenchmarkLanguage(b *testing.B) {
 			lp.Parse()
 		}
 	}
-	fmt.Println(lu.Prof)
-	//	fmt.Println(lp)
+	fmt.Println(util.Prof)
 }

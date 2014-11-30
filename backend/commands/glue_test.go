@@ -1,8 +1,12 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package commands
 
 import (
-	"github.com/quarnster/util/text"
-	. "lime/backend"
+	. "github.com/limetext/lime/backend"
+	"github.com/limetext/text"
 	"testing"
 )
 
@@ -10,7 +14,14 @@ func TestGlueCmds(t *testing.T) {
 	ed := GetEditor()
 	ch := ed.CommandHandler()
 	w := ed.NewWindow()
+	defer w.Close()
+
 	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
 	v.SetScratch(true)
 	e := v.BeginEdit()
 	v.Insert(e, 0, "Hello World!\nTest123123\nAbrakadabra\n")

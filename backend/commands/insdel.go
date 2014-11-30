@@ -1,43 +1,59 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package commands
 
 import (
-	"fmt"
-	"github.com/quarnster/util/text"
-	. "lime/backend"
+	. "github.com/limetext/lime/backend"
+	"github.com/limetext/text"
+	"strings"
 )
 
 type (
+	// The InsertCommand inserts the given characters, at all
+	// of the current selection locations, possibly replacing
+	// text if the selection area covers one or more characters.
 	InsertCommand struct {
 		DefaultCommand
+		// The characters to insert
+		Characters string
 	}
 
+	// The LeftDeleteCommand deletes characters to the left of the
+	// current selection or the current selection if it is not empty.
 	LeftDeleteCommand struct {
 		DefaultCommand
 	}
 
+	// The RightDeleteCommand deletes characters to the right of the
+	// current selection or the current selection if it is not empty.
 	RightDeleteCommand struct {
 		DefaultCommand
 	}
+
+	// The DeleteWordCommand deletes one word to right or left
+	// depending on forward variable
+	DeleteWordCommand struct {
+		DefaultCommand
+		Forward bool
+	}
 )
 
-func (c *InsertCommand) Run(v *View, e *Edit, args Args) error {
+func (c *InsertCommand) Run(v *View, e *Edit) error {
 	sel := v.Sel()
-	chars, ok := args["characters"].(string)
-	if !ok {
-		return fmt.Errorf("insert: Missing or invalid characters argument: %v", args)
-	}
 	for i := 0; i < sel.Len(); i++ {
 		r := sel.Get(i)
 		if r.Size() == 0 {
-			v.Insert(e, r.B, chars)
+			v.Insert(e, r.B, c.Characters)
 		} else {
-			v.Replace(e, r, chars)
+			v.Replace(e, r, c.Characters)
 		}
 	}
 	return nil
 }
 
-func (c *LeftDeleteCommand) Run(v *View, e *Edit, args Args) error {
+func (c *LeftDeleteCommand) Run(v *View, e *Edit) error {
 	trim_space := false
 	tab_size := 4
 	if t, ok := v.Settings().Get("translate_tabs_to_spaces", false).(bool); ok && t {
@@ -86,7 +102,7 @@ func (c *LeftDeleteCommand) Run(v *View, e *Edit, args Args) error {
 	return nil
 }
 
-func (c *RightDeleteCommand) Run(v *View, e *Edit, args Args) error {
+func (c *RightDeleteCommand) Run(v *View, e *Edit) error {
 	sel := v.Sel()
 	hasNonEmpty := sel.HasNonEmpty()
 	i := 0
@@ -108,10 +124,75 @@ func (c *RightDeleteCommand) Run(v *View, e *Edit, args Args) error {
 	return nil
 }
 
+func (c *DeleteWordCommand) Run(v *View, e *Edit) error {
+	var class int
+	if c.Forward {
+		class = CLASS_WORD_END | CLASS_PUNCTUATION_END | CLASS_LINE_START
+	} else {
+		class = CLASS_WORD_START | CLASS_PUNCTUATION_START | CLASS_LINE_END | CLASS_LINE_START
+	}
+
+	sel := v.Sel()
+	var rs []text.Region
+	for i := 0; i < sel.Len(); i++ {
+		r := sel.Get(i)
+		if r.Empty() {
+			p := c.findByClass(r.A, class, v)
+			if c.Forward {
+				r = text.Region{r.A, p}
+			} else {
+				r = text.Region{p, r.A}
+			}
+		}
+		rs = append(rs, r)
+	}
+	sel.Clear()
+	sel.AddAll(rs)
+	if c.Forward {
+		GetEditor().CommandHandler().RunTextCommand(v, "right_delete", nil)
+	} else {
+		GetEditor().CommandHandler().RunTextCommand(v, "left_delete", nil)
+	}
+	return nil
+}
+
+func (c *DeleteWordCommand) findByClass(point int, class int, v *View) int {
+	var end, d int
+	if c.Forward {
+		d = 1
+		end = v.Buffer().Size()
+		if point > end {
+			point = end
+		}
+		s := v.Buffer().Substr(text.Region{point, point + 2})
+		if strings.Contains(s, "\t") && strings.Contains(s, " ") {
+			class = CLASS_WORD_START | CLASS_PUNCTUATION_START | CLASS_LINE_END
+		}
+	} else {
+		d = -1
+		end = 0
+		if point < end {
+			point = end
+		}
+		s := v.Buffer().Substr(text.Region{point - 2, point})
+		if strings.Contains(s, "\t") && strings.Contains(s, " ") {
+			class = CLASS_WORD_END | CLASS_PUNCTUATION_END | CLASS_LINE_START
+		}
+	}
+	point += d
+	for ; point != end; point += d {
+		if v.Classify(point)&class != 0 {
+			return point
+		}
+	}
+	return point
+}
+
 func init() {
-	register([]cmd{
-		{"insert", &InsertCommand{}},
-		{"left_delete", &LeftDeleteCommand{}},
-		{"right_delete", &RightDeleteCommand{}},
+	register([]Command{
+		&InsertCommand{},
+		&LeftDeleteCommand{},
+		&RightDeleteCommand{},
+		&DeleteWordCommand{},
 	})
 }

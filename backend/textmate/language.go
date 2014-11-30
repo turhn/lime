@@ -1,15 +1,20 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package textmate
 
 import (
-	"code.google.com/p/log4go"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/limetext/lime/backend/loaders"
+	"github.com/limetext/lime/backend/log"
+	"github.com/limetext/rubex"
+	"github.com/limetext/text"
 	"github.com/quarnster/parser"
-	"github.com/quarnster/util/text"
 	"io/ioutil"
-	"lime/3rdparty/libs/rubex"
-	"lime/backend/loaders"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,7 +50,12 @@ type (
 		Name string
 	}
 
-	Captures map[string]Named
+	Capture struct {
+		Key int
+		Named
+	}
+
+	Captures []Capture
 
 	MatchObject []int
 
@@ -67,6 +77,7 @@ type (
 		hits           int
 		misses         int
 	}
+
 	RootPattern struct {
 		Pattern
 	}
@@ -106,19 +117,18 @@ func (t *LanguageProvider) LanguageFromScope(id string) (*Language, error) {
 }
 
 func (t *LanguageProvider) LanguageFromFile(fn string) (*Language, error) {
-	if d, err := ioutil.ReadFile(fn); err != nil {
+	d, err := ioutil.ReadFile(fn)
+	if err != nil {
 		return nil, fmt.Errorf("Couldn't load file %s: %s", fn, err)
-	} else {
-		var l Language
-		if err := loaders.LoadPlist(d, &l); err != nil {
-			return nil, err
-		} else {
-			t.Lock()
-			defer t.Unlock()
-			t.scope[l.ScopeName] = fn
-			return &l, nil
-		}
 	}
+	var l Language
+	if err := loaders.LoadPlist(d, &l); err != nil {
+		return nil, err
+	}
+	t.Lock()
+	defer t.Unlock()
+	t.scope[l.ScopeName] = fn
+	return &l, nil
 }
 
 func (p Pattern) String() (ret string) {
@@ -191,11 +201,36 @@ func (r *Regex) UnmarshalJSON(data []byte) error {
 	str = strings.Replace(str, "\\n", "\n", -1)
 	str = strings.Replace(str, "\\t", "\t", -1)
 	if re, err := rubex.Compile(str); err != nil {
-		log4go.Warn("Couldn't compile language pattern %s: %s", str, err)
+		log.Warn("Couldn't compile language pattern %s: %s", str, err)
 	} else {
 		r.re = re
 	}
 	return nil
+}
+
+func (c *Captures) UnmarshalJSON(data []byte) error {
+	tmp := make(map[string]Named)
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+	for k, v := range tmp {
+		i, _ := strconv.ParseInt(k, 10, 32)
+		*c = append(*c, Capture{Key: int(i), Named: v})
+	}
+	sort.Sort(c)
+	return nil
+}
+
+func (c *Captures) Len() int {
+	return len(*c)
+}
+
+func (c *Captures) Less(i, j int) bool {
+	return (*c)[i].Key < (*c)[j].Key
+}
+
+func (c *Captures) Swap(i, j int) {
+	(*c)[i], (*c)[j] = (*c)[j], (*c)[i]
 }
 
 func (m MatchObject) fix(add int) {
@@ -283,14 +318,14 @@ func (p *Pattern) Cache(data string, pos int) (pat *Pattern, ret MatchObject) {
 			if p2, ok := p.owner.Repository[key]; ok {
 				pat, ret = p2.Cache(data, pos)
 			} else {
-				log4go.Fine("Not found in repository: %s", p.Include)
+				log.Fine("Not found in repository: %s", p.Include)
 			}
 		} else if z == '$' {
 			// TODO(q): Implement tmLanguage $ include directives
-			log4go.Warn("Unhandled include directive: %s", p.Include)
+			log.Warn("Unhandled include directive: %s", p.Include)
 		} else if l, err := Provider.GetLanguage(p.Include); err != nil {
 			if !failed[p.Include] {
-				log4go.Warn("Include directive %s failed: %s", p.Include, err)
+				log.Warn("Include directive %s failed: %s", p.Include, err)
 			}
 			failed[p.Include] = true
 		} else {
@@ -306,7 +341,7 @@ func (p *Pattern) Cache(data string, pos int) (pat *Pattern, ret MatchObject) {
 	return
 }
 
-func (p *Pattern) CreateCaptureNodes(data string, pos int, d parser.DataSource, mo MatchObject, parent *parser.Node, cap Captures) {
+func (p *Pattern) CreateCaptureNodes(data string, pos int, d parser.DataSource, mo MatchObject, parent *parser.Node, capt Captures) {
 	ranges := make([]text.Region, len(mo)/2)
 	parentIndex := make([]int, len(ranges))
 	parents := make([]*parser.Node, len(parentIndex))
@@ -325,87 +360,89 @@ func (p *Pattern) CreateCaptureNodes(data string, pos int, d parser.DataSource, 
 		}
 	}
 
-	for k, v := range cap {
-		i64, err := strconv.ParseInt(k, 10, 32)
-		if i := int(i64); err == nil && i < len(parents) {
-			if ranges[i].A == -1 {
-				continue
-			}
-			child := &parser.Node{Name: v.Name, Range: ranges[i], P: d}
-			parents[i] = child
-			if i == 0 {
-				parent.Append(child)
-				continue
-			}
-			var p *parser.Node
-			for p == nil {
-				i = parentIndex[i]
-				p = parents[i]
-			}
-			p.Append(child)
+	for _, v := range capt {
+		i := v.Key
+		if i >= len(parents) || ranges[i].A == -1 {
+			continue
 		}
+		child := &parser.Node{Name: v.Name, Range: ranges[i], P: d}
+		parents[i] = child
+		if i == 0 {
+			parent.Append(child)
+			continue
+		}
+		var p *parser.Node
+		for p == nil {
+			i = parentIndex[i]
+			p = parents[i]
+		}
+		p.Append(child)
 	}
 }
 
-func (p *Pattern) CreateNode(data string, pos int, d parser.DataSource, mo MatchObject) *parser.Node {
-	ret := parser.Node{Name: p.Name, Range: text.Region{mo[0], mo[1]}, P: d}
-	if p.Match.re != nil {
-		p.CreateCaptureNodes(data, pos, d, mo, &ret, p.Captures)
-	} else if p.Begin.re != nil {
-		if len(p.BeginCaptures) > 0 {
-			p.CreateCaptureNodes(data, pos, d, mo, &ret, p.BeginCaptures)
-		} else {
-			p.CreateCaptureNodes(data, pos, d, mo, &ret, p.Captures)
-		}
+func (p *Pattern) CreateNode(data string, pos int, d parser.DataSource, mo MatchObject) (ret *parser.Node) {
+	ret = &parser.Node{Name: p.Name, Range: text.Region{mo[0], mo[1]}, P: d}
+	defer ret.UpdateRange()
 
-		if p.End.re != nil {
-			var (
-				found  = false
-				i, end int
-			)
-			for i, end = ret.Range.B, len(data); i < len(data); {
-				endmatch := p.End.Find(data, i)
-				if endmatch != nil {
-					end = endmatch[1]
+	if p.Match.re != nil {
+		p.CreateCaptureNodes(data, pos, d, mo, ret, p.Captures)
+	}
+	if p.Begin.re == nil {
+		return
+	}
+	if len(p.BeginCaptures) > 0 {
+		p.CreateCaptureNodes(data, pos, d, mo, ret, p.BeginCaptures)
+	} else {
+		p.CreateCaptureNodes(data, pos, d, mo, ret, p.Captures)
+	}
+
+	if p.End.re == nil {
+		return
+	}
+	var (
+		found  = false
+		i, end int
+	)
+	for i, end = ret.Range.B, len(data); i < len(data); {
+		endmatch := p.End.Find(data, i)
+		if endmatch != nil {
+			end = endmatch[1]
+		} else {
+			if !found {
+				// oops.. no end found at all, set it to the next line
+				if e2 := strings.IndexRune(data[i:], '\n'); e2 != -1 {
+					end = i + e2
 				} else {
-					if !found {
-						// oops.. no end found at all, set it to the next line
-						if e2 := strings.IndexRune(data[i:], '\n'); e2 != -1 {
-							end = i + e2
-						} else {
-							end = len(data)
-						}
-						break
-					} else {
-						end = i
-						break
-					}
-				}
-				if /*(endmatch == nil || (endmatch != nil && endmatch[0] != i)) && */ len(p.cachedPatterns) > 0 {
-					// Might be more recursive patterns to apply BEFORE the end is reached
-					pattern2, match2 := p.FirstMatch(data, i)
-					if match2 != nil && ((endmatch == nil && match2[0] < end) || (endmatch != nil && (match2[0] < endmatch[0] || match2[0] == endmatch[0] && ret.Range.A == ret.Range.B))) {
-						found = true
-						r := pattern2.CreateNode(data, i, d, match2)
-						ret.Append(r)
-						i = r.Range.B
-						continue
-					}
-				}
-				if endmatch != nil {
-					if len(p.EndCaptures) > 0 {
-						p.CreateCaptureNodes(data, i, d, endmatch, &ret, p.EndCaptures)
-					} else {
-						p.CreateCaptureNodes(data, i, d, endmatch, &ret, p.Captures)
-					}
+					end = len(data)
 				}
 				break
+			} else {
+				end = i
+				break
 			}
-			ret.Range.B = end
 		}
+		if /*(endmatch == nil || (endmatch != nil && endmatch[0] != i)) && */ len(p.cachedPatterns) > 0 {
+			// Might be more recursive patterns to apply BEFORE the end is reached
+			pattern2, match2 := p.FirstMatch(data, i)
+			if match2 != nil && ((endmatch == nil && match2[0] < end) || (endmatch != nil && (match2[0] < endmatch[0] || match2[0] == endmatch[0] && ret.Range.A == ret.Range.B))) {
+				found = true
+				r := pattern2.CreateNode(data, i, d, match2)
+				ret.Append(r)
+				i = r.Range.B
+				continue
+			}
+		}
+		if endmatch != nil {
+			if len(p.EndCaptures) > 0 {
+				p.CreateCaptureNodes(data, i, d, endmatch, ret, p.EndCaptures)
+			} else {
+				p.CreateCaptureNodes(data, i, d, endmatch, ret, p.Captures)
+			}
+		}
+		break
 	}
-	ret.UpdateRange()
-	return &ret
+	ret.Range.B = end
+	return
 }
 
 func (d *LanguageParser) Data(a, b int) string {
@@ -435,8 +472,8 @@ func (lp *LanguageParser) Parse() (*parser.Node, error) {
 	rn := parser.Node{P: lp, Name: lp.l.ScopeName}
 	defer func() {
 		if r := recover(); r != nil {
-			log4go.Error("Panic during parse: %v\n", r)
-			log4go.Debug("%v", rn)
+			log.Error("Panic during parse: %v\n", r)
+			log.Debug("%v", rn)
 		}
 	}()
 	iter := maxiter

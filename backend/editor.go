@@ -1,12 +1,19 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package backend
 
 import (
-	"code.google.com/p/log4go"
 	"fmt"
-	. "github.com/quarnster/util/text"
-	"io/ioutil"
-	"lime/backend/loaders"
-	. "lime/backend/util"
+	"github.com/atotto/clipboard"
+	"github.com/limetext/lime/backend/keys"
+	"github.com/limetext/lime/backend/log"
+	"github.com/limetext/lime/backend/packages"
+	. "github.com/limetext/lime/backend/util"
+	"github.com/limetext/lime/backend/watch"
+	. "github.com/limetext/text"
+	"path"
 	"runtime"
 	"runtime/debug"
 	"sync"
@@ -20,64 +27,82 @@ func init() {
 type (
 	Editor struct {
 		HasSettings
-		windows       []*Window
-		active_window *Window
-		loginput      bool
-		cmdhandler    commandHandler
-		keyBindings   KeyBindings
-		console       *View
-		frontend      Frontend
-		clipboard     string
-		keyInput      chan (KeyPress)
+		windows      []*Window
+		activeWindow *Window
+		logInput     bool
+		cmdHandler   commandHandler
+		keyBindings  keys.KeyBindings
+		console      *View
+		frontend     Frontend
+		keyInput     chan (keys.KeyPress)
+		*watch.Watcher
+		clipboardSetter func(string) error
+		clipboardGetter func() (string, error)
+		clipboard       string
 	}
+
+	// The Frontend interface defines the API
+	// for functionality that is frontend specific.
 	Frontend interface {
+		// Probe the frontend for the currently
+		// visible region of the given view.
 		VisibleRegion(v *View) Region
+
+		// Make the frontend show the specified region of the
+		// given view.
 		Show(v *View, r Region)
+
+		// Sets the status message shown in the status bar
 		StatusMessage(string)
+
+		// Displays an error message to the usser
 		ErrorMessage(string)
+
+		// Displays a message dialog to the user
 		MessageDialog(string)
-		OkCancelDialog(msg string, okname string)
+
+		// Displays an ok / cancel dialog to the user.
+		// "okname" if provided will be used as the text
+		// instead of "Ok" for the ok button.
+		// Returns true when ok was pressed, and false when
+		// cancel was pressed.
+		OkCancelDialog(msg string, okname string) bool
 	}
-	myLogWriter struct {
-		log chan string
+
+	DummyFrontend struct {
+		m sync.Mutex
+		// Default return value for OkCancelDialog
+		defaultAction bool
 	}
-	DummyFrontend struct{}
 )
 
-func (h *DummyFrontend) StatusMessage(msg string)      {}
-func (h *DummyFrontend) ErrorMessage(msg string)       {}
-func (h *DummyFrontend) MessageDialog(msg string)      {}
-func (h *DummyFrontend) OkCancelDialog(string, string) {}
-func (h *DummyFrontend) Show(v *View, r Region)        {}
-func (h *DummyFrontend) VisibleRegion(v *View) Region  { return Region{} }
+var (
+	LIME_USER_PACKAGES_PATH = path.Join("..", "..", "packages")
+	LIME_USER_PACKETS_PATH  = path.Join("..", "..", "packages", "User")
+	LIME_PACKAGES_PATH      = path.Join("..", "..", "packages")
+	LIME_DEFAULTS_PATH      = path.Join("..", "..", "packages", "Default")
 
-func newMyLogWriter() *myLogWriter {
-	ret := &myLogWriter{make(chan string, 100)}
-	go ret.handle()
-	return ret
-}
+	// All user individual settings, snippets, etc.
+	// will be in here for later loading
+	packets packages.Packets
+)
 
-func (m *myLogWriter) handle() {
-	for fl := range m.log {
-		c := GetEditor().Console()
-		f := fmt.Sprintf("%08d %d %s", c.Buffer().Size(), len(fl), fl)
-		e := c.BeginEdit()
-		c.Insert(e, c.Buffer().Size(), f)
-		c.EndEdit(e)
-	}
+func (h *DummyFrontend) SetDefaultAction(action bool) {
+	h.m.Lock()
+	defer h.m.Unlock()
+	h.defaultAction = action
 }
-
-func (m *myLogWriter) LogWrite(rec *log4go.LogRecord) {
-	p := Prof.Enter("log")
-	defer p.Exit()
-	fl := log4go.FormatLogRecord(log4go.FORMAT_DEFAULT, rec)
-	m.log <- fl
+func (h *DummyFrontend) StatusMessage(msg string) { log.Info(msg) }
+func (h *DummyFrontend) ErrorMessage(msg string)  { log.Error(msg) }
+func (h *DummyFrontend) MessageDialog(msg string) { log.Info(msg) }
+func (h *DummyFrontend) OkCancelDialog(msg string, button string) bool {
+	log.Info(msg)
+	h.m.Lock()
+	defer h.m.Unlock()
+	return h.defaultAction
 }
-
-func (m *myLogWriter) Close() {
-	fmt.Println("Closing...")
-	close(m.log)
-}
+func (h *DummyFrontend) Show(v *View, r Region)       {}
+func (h *DummyFrontend) VisibleRegion(v *View) Region { return Region{} }
 
 var (
 	ed  *Editor
@@ -89,7 +114,7 @@ func GetEditor() *Editor {
 	defer edl.Unlock()
 	if ed == nil {
 		ed = &Editor{
-			cmdhandler: commandHandler{
+			cmdHandler: commandHandler{
 				ApplicationCommands: make(appcmd),
 				TextCommands:        make(textcmd),
 				WindowCommands:      make(wndcmd),
@@ -100,14 +125,17 @@ func GetEditor() *Editor {
 				buffer:  NewBuffer(),
 				scratch: true,
 			},
-			keyInput: make(chan KeyPress, 32),
+			keyInput: make(chan keys.KeyPress, 32),
+		}
+		var err error
+		if ed.Watcher, err = watch.NewWatcher(); err != nil {
+			log.Error("Couldn't create watcher: %s", err)
 		}
 		ed.console.Settings().Set("is_widget", true)
 		ed.Settings() // Just to initialize it
-		log4go.Global.Close()
-		log4go.Global.AddFilter("console", log4go.DEBUG, newMyLogWriter())
+		log.AddFilter("console", log.DEBUG, log.NewLogWriter(ed.handleLog))
 		go ed.inputthread()
-		//		initBasicCommands()
+		go ed.Observe()
 	}
 	return ed
 }
@@ -120,49 +148,83 @@ func (e *Editor) SetFrontend(f Frontend) {
 	e.frontend = f
 }
 
+func setClipboard(n string) error {
+	return clipboard.WriteAll(n)
+}
+
+func getClipboard() (string, error) {
+	return clipboard.ReadAll()
+}
+
 func (e *Editor) Init() {
-	ed.loadKeybindings()
+	ed.SetClipboardFuncs(setClipboard, getClipboard)
+	ed.loadDefaultPackets()
+	ed.loadKeyBindings()
 	ed.loadSettings()
 }
 
-func (e *Editor) loadKeybinding(fn string) {
-	if d, err := ioutil.ReadFile(fn); err != nil {
-		log4go.Error("Couldn't load file %s: %s", fn, err)
-	} else {
-		var bindings KeyBindings
-		if err := loaders.LoadJSON(d, &bindings); err != nil {
-			log4go.Error(err)
-		} else {
-			log4go.Info("Loaded %s", fn)
-		}
-		e.keyBindings.merge(&bindings)
-	}
-}
-func (e *Editor) loadKeybindings() {
-	// TODO(q): should search for keybindings
-	e.loadKeybinding("../../backend/packages/Default/Default.sublime-keymap")
-	e.loadKeybinding("../../3rdparty/bundles/Vintageous/Default.sublime-keymap")
+func (e *Editor) SetClipboardFuncs(setter func(string) error, getter func() (string, error)) {
+	e.clipboardSetter = setter
+	e.clipboardGetter = getter
 }
 
-func (e *Editor) loadSetting(fn string) {
-	if d, err := ioutil.ReadFile(fn); err != nil {
-		log4go.Error("Couldn't load file %s: %s", fn, err)
-	} else {
-		if err := loaders.LoadJSON(d, e.Settings()); err != nil {
-			log4go.Error(err)
-		} else {
-			log4go.Info("Loaded %s", fn)
+func (e *Editor) loadDefaultPackets() {
+	paths := []string{
+		LIME_DEFAULTS_PATH,
+		LIME_USER_PACKETS_PATH,
+	}
+	for _, path := range paths {
+		for _, p := range packages.ScanPackets(path) {
+			packets = append(packets, p)
 		}
+	}
+}
+
+func (e *Editor) loadKeyBinding(pkg *packages.Packet) {
+	if err := pkg.Load(); err != nil {
+		log.Error(err)
+	} else {
+		log.Info("Loaded %s", pkg.Name())
+		e.Watch(pkg.Name(), pkg)
+	}
+	e.keyBindings.Merge(pkg.MarshalTo().(*keys.KeyBindings))
+}
+
+func (e *Editor) loadKeyBindings() {
+	for _, p := range packets.Filter("keymap") {
+		e.loadKeyBinding(p)
+	}
+}
+
+func (e *Editor) loadSetting(pkg *packages.Packet) {
+	if err := pkg.Load(); err != nil {
+		log.Error(err)
+	} else {
+		log.Info("Loaded %s", pkg.Name())
+		e.Watch(pkg.Name(), pkg)
 	}
 }
 
 func (e *Editor) loadSettings() {
-	// TODO(q): should search for settings
-	e.loadSetting("../../backend/packages/Default/Default.sublime-settings")
+	defSettings, platSettings := &HasSettings{}, &HasSettings{}
+	platSettings.Settings().SetParent(defSettings)
+	ed.Settings().SetParent(platSettings)
+
+	p := path.Join(LIME_DEFAULTS_PATH, "Preferences.sublime-settings")
+	defPckt := packages.NewPacket(p, defSettings.Settings())
+	e.loadSetting(defPckt)
+
+	p = path.Join(LIME_DEFAULTS_PATH, "Preferences ("+e.plat()+").sublime-settings")
+	platPckt := packages.NewPacket(p, platSettings.Settings())
+	e.loadSetting(platPckt)
+
+	p = path.Join(LIME_USER_PACKETS_PATH, "Preferences.sublime-settings")
+	userPckt := packages.NewPacket(p, e.Settings())
+	e.loadSetting(userPckt)
 }
 
 func (e *Editor) PackagesPath() string {
-	return "../../3rdparty/bundles/"
+	return LIME_USER_PACKAGES_PATH
 }
 
 func (e *Editor) Console() *View {
@@ -172,17 +234,17 @@ func (e *Editor) Console() *View {
 func (e *Editor) Windows() []*Window {
 	edl.Lock()
 	defer edl.Unlock()
-	ret := make([]*Window, 0, len(e.windows))
+	ret := make([]*Window, len(e.windows))
 	copy(ret, e.windows)
 	return ret
 }
 
 func (e *Editor) SetActiveWindow(w *Window) {
-	e.active_window = w
+	e.activeWindow = w
 }
 
 func (e *Editor) ActiveWindow() *Window {
-	return e.active_window
+	return e.activeWindow
 }
 
 func (e *Editor) NewWindow() *Window {
@@ -196,6 +258,22 @@ func (e *Editor) NewWindow() *Window {
 	return w
 }
 
+func (e *Editor) remove(w *Window) {
+	edl.Lock()
+	defer edl.Unlock()
+	for i, ww := range e.windows {
+		if w == ww {
+			end := len(e.windows) - 1
+			if i != end {
+				copy(e.windows[i:], e.windows[i+1:])
+			}
+			e.windows = e.windows[:end]
+			return
+		}
+	}
+	log.Error("Wanted to remove window %+v, but it doesn't appear to be a child of this editor", w)
+}
+
 func (e *Editor) Arch() string {
 	return runtime.GOARCH
 }
@@ -204,25 +282,35 @@ func (e *Editor) Platform() string {
 	return runtime.GOOS
 }
 
+func (e *Editor) plat() string {
+	switch e.Platform() {
+	case "windows":
+		return "Windows"
+	case "darwin":
+		return "OSX"
+	}
+	return "Linux"
+}
+
 func (e *Editor) Version() string {
 	return "0"
 }
 
 func (e *Editor) CommandHandler() CommandHandler {
-	return &e.cmdhandler
+	return &e.cmdHandler
 }
 
-func (e *Editor) HandleInput(kp KeyPress) {
+func (e *Editor) HandleInput(kp keys.KeyPress) {
 	e.keyInput <- kp
 }
 
 func (e *Editor) inputthread() {
 	pc := 0
-	var lastBindings KeyBindings
-	doinput := func(kp KeyPress) {
+	var lastBindings keys.KeyBindings
+	doinput := func(kp keys.KeyPress) {
 		defer func() {
 			if r := recover(); r != nil {
-				log4go.Error("Panic in inputthread: %v\n%s", r, string(debug.Stack()))
+				log.Error("Panic in inputthread: %v\n%s", r, string(debug.Stack()))
 				if pc > 0 {
 					panic(r)
 				}
@@ -232,12 +320,12 @@ func (e *Editor) inputthread() {
 		p := Prof.Enter("hi")
 		defer p.Exit()
 
-		lvl := log4go.FINE
-		if e.loginput {
+		lvl := log.FINE
+		if e.logInput {
 			lvl++
 		}
-		log4go.Logf(lvl, "Key: %v", kp)
-		if lastBindings.keyOff == 0 {
+		log.Logf(lvl, "Key: %v", kp)
+		if lastBindings.KeyOff() == 0 {
 			lastBindings = e.keyBindings
 		}
 	try_again:
@@ -253,29 +341,22 @@ func (e *Editor) inputthread() {
 			v = wnd.ActiveView()
 		}
 
-		if action := possible_actions.Action(v); action != nil {
+		qc := func(key string, operator Op, operand interface{}, match_all bool) bool {
+			return OnQueryContext.Call(v, key, operator, operand, match_all) == True
+		}
+
+		if action := possible_actions.Action(qc); action != nil {
 			p2 := Prof.Enter("hi.perform")
-			// TODO: what's the command precedence?
-			if c := e.cmdhandler.TextCommands[action.Command]; c != nil {
-				if err := e.CommandHandler().RunTextCommand(v, action.Command, action.Args); err != nil {
-					log4go.Debug("Couldn't run textcommand: %s", err)
-				}
-			} else if c := e.cmdhandler.WindowCommands[action.Command]; c != nil {
-				if err := e.CommandHandler().RunWindowCommand(wnd, action.Command, action.Args); err != nil {
-					log4go.Debug("Couldn't run windowcommand: %s", err)
-				}
-			} else if err := e.CommandHandler().RunApplicationCommand(action.Command, action.Args); err != nil {
-				log4go.Debug("Couldn't run applicationcommand: %s", err)
-			}
+			e.RunCommand(action.Command, action.Args)
 			p2.Exit()
-		} else if possible_actions.keyOff > 1 {
+		} else if possible_actions.KeyOff() > 1 {
 			lastBindings = e.keyBindings
 			goto try_again
 		} else if kp.IsCharacter() {
 			p2 := Prof.Enter("hi.character")
-			log4go.Finest("kp: %v, pos: %v", kp, possible_actions)
+			log.Finest("kp: %v, pos: %v", kp, possible_actions)
 			if err := e.CommandHandler().RunTextCommand(v, "insert", Args{"characters": string(rune(kp.Key))}); err != nil {
-				log4go.Debug("Couldn't run textcommand: %s", err)
+				log.Debug("Couldn't run textcommand: %s", err)
 			}
 			p2.Exit()
 		}
@@ -286,21 +367,64 @@ func (e *Editor) inputthread() {
 }
 
 func (e *Editor) LogInput(l bool) {
-	e.loginput = l
+	e.logInput = l
 }
 
 func (e *Editor) LogCommands(l bool) {
-	e.cmdhandler.log = l
+	e.cmdHandler.log = l
 }
 
 func (e *Editor) RunCommand(name string, args Args) {
-	e.CommandHandler().RunApplicationCommand(name, args)
+	// TODO?
+	var (
+		wnd *Window
+		v   *View
+	)
+	if wnd = e.ActiveWindow(); wnd != nil {
+		v = wnd.ActiveView()
+	}
+
+	// TODO: what's the command precedence?
+	if c := e.cmdHandler.TextCommands[name]; c != nil {
+		if err := e.CommandHandler().RunTextCommand(v, name, args); err != nil {
+			log.Debug("Couldn't run textcommand: %s", err)
+		}
+	} else if c := e.cmdHandler.WindowCommands[name]; c != nil {
+		if err := e.CommandHandler().RunWindowCommand(wnd, name, args); err != nil {
+			log.Debug("Couldn't run windowcommand: %s", err)
+		}
+	} else if c := e.cmdHandler.ApplicationCommands[name]; c != nil {
+		if err := e.CommandHandler().RunApplicationCommand(name, args); err != nil {
+			log.Debug("Couldn't run applicationcommand: %s", err)
+		}
+	} else {
+		log.Debug("Couldn't find command to run")
+	}
 }
 
 func (e *Editor) SetClipboard(n string) {
+	if err := e.clipboardSetter(n); err != nil {
+		log.Error("Could not set clipboard: %v", err)
+	}
+
+	// Keep a local copy in case the system clipboard isn't working
 	e.clipboard = n
 }
 
 func (e *Editor) GetClipboard() string {
+	if n, err := e.clipboardGetter(); err == nil {
+		return n
+	} else {
+		log.Error("Could not get clipboard: %v", err)
+	}
+
 	return e.clipboard
+}
+
+func (ed *Editor) handleLog(s string) {
+	c := ed.Console()
+	f := fmt.Sprintf("%08d %d %s", c.Buffer().Size(), len(s), s)
+	e := c.BeginEdit()
+	c.Insert(e, c.Buffer().Size(), f)
+	c.EndEdit(e)
 }

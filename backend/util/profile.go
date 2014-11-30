@@ -1,3 +1,7 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package util
 
 import (
@@ -8,13 +12,13 @@ import (
 )
 
 type (
-	Profileentry struct {
+	ProfileEntry struct {
 		Calls   int
 		Tottime time.Duration
 	}
 	Profiler struct {
 		mutex sync.Mutex
-		data  map[string]Profileentry
+		data  map[string]ProfileEntry
 	}
 	ProfToken struct {
 		Name  string
@@ -22,7 +26,7 @@ type (
 	}
 	ProfileResult struct {
 		Name string
-		Profileentry
+		ProfileEntry
 	}
 	prsorter struct {
 		data []ProfileResult
@@ -30,7 +34,7 @@ type (
 	}
 )
 
-var Prof = Profiler{data: make(map[string]Profileentry)}
+var Prof = Profiler{data: make(map[string]ProfileEntry)}
 
 func (p *Profiler) Enter(name string) ProfToken {
 	return ProfToken{name, time.Now()}
@@ -91,6 +95,7 @@ func (v ProfileResult) String() string {
 
 func (p Profiler) String() (ret string) {
 	pr := p.SortByAvgTime()
+	ret = fmt.Sprintf("%64s %6s, %20s, %20s\n", "Name", "Calls", "Total Time", "Average")
 	for _, v := range pr {
 		ret += fmt.Sprintf("%s\n", v)
 	}

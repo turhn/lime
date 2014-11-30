@@ -1,12 +1,28 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package loaders
 
 import (
 	sj "encoding/json"
 	"errors"
 	"fmt"
-	. "github.com/quarnster/util/text"
-	"lime/backend/loaders/json"
+	"github.com/limetext/lime/backend/loaders/json"
+	. "github.com/limetext/text"
 )
+
+type regionSetAdjuster struct {
+	Set *RegionSet
+}
+
+func (adjuster *regionSetAdjuster) Erased(changed_buffer Buffer, region_removed Region, data_removed []rune) {
+	adjuster.Set.Adjust(region_removed.B, region_removed.A-region_removed.B)
+}
+
+func (adjuster *regionSetAdjuster) Inserted(changed_buffer Buffer, region_inserted Region, data_inserted []rune) {
+	adjuster.Set.Adjust(region_inserted.A, region_inserted.B-region_inserted.A)
+}
 
 func LoadJSON(data []byte, intf interface{}) error {
 	var (
@@ -29,22 +45,19 @@ func LoadJSON(data []byte, intf interface{}) error {
 
 	if !p.Parse(str) {
 		return fmt.Errorf("%s, %s", p.Error(), p.RootNode())
-	} else {
-		root := p.RootNode()
-		for _, child := range root.Children {
-			switch child.Name {
-			case "BlockComment", "LineComment", "EndOfFile", "JunkComma":
-				if child.Range.End() < len(lut) {
-					set.Add(Region{lut[child.Range.Begin()], lut[child.Range.End()]})
-				}
-			default:
-				return errors.New("Unhandled node: " + child.Name)
+	}
+	root := p.RootNode()
+	for _, child := range root.Children {
+		switch child.Name {
+		case "BlockComment", "LineComment", "EndOfFile", "JunkComma":
+			if child.Range.End() < len(lut) {
+				set.Add(Region{lut[child.Range.Begin()], lut[child.Range.End()]})
 			}
+		default:
+			return errors.New("Unhandled node: " + child.Name)
 		}
 	}
-	b.AddCallback(func(b Buffer, pos, delta int) {
-		set.Adjust(pos, delta)
-	})
+	b.AddObserver(&regionSetAdjuster{Set: &set})
 	i := 0
 	for {
 		l := set.Len()

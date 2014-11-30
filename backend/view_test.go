@@ -1,21 +1,34 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package backend
 
 import (
 	"fmt"
-	"github.com/quarnster/completion/util"
-	. "github.com/quarnster/util/text"
+	"github.com/limetext/lime/backend/textmate"
+	"github.com/limetext/lime/backend/util"
+	. "github.com/limetext/text"
 	"io/ioutil"
 	"math/rand"
+	"os"
+	"path"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestView(t *testing.T) {
-	var (
-		w Window
-		v = w.NewFile()
-	)
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
 	edit := v.BeginEdit()
 	v.Insert(edit, 0, "abcd")
 	v.EndEdit(edit)
@@ -102,11 +115,17 @@ func TestView(t *testing.T) {
 }
 
 func TestErase(t *testing.T) {
-	var (
-		w Window
-		v = w.NewFile()
-		s = v.Sel()
-	)
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	s := v.Sel()
+
 	edit := v.BeginEdit()
 	v.Insert(edit, 0, "1234abcd5678abcd")
 	v.EndEdit(edit)
@@ -129,10 +148,15 @@ func TestErase(t *testing.T) {
 
 // This is not 100% what ST3 does
 func TestExtractScope(t *testing.T) {
-	var (
-		w Window
-		v = w.NewFile()
-	)
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
 	const (
 		in      = "textmate/testdata/main.go"
 		expfile = "testdata/scoperange.res"
@@ -170,10 +194,15 @@ func TestExtractScope(t *testing.T) {
 
 // This is not 100% what ST3 does, but IMO ST3 is wrong
 func TestScopeName(t *testing.T) {
-	var (
-		w Window
-		v = w.NewFile()
-	)
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
 	const (
 		in      = "textmate/testdata/main.go"
 		expfile = "testdata/scopename.res"
@@ -212,15 +241,644 @@ func TestScopeName(t *testing.T) {
 		} else if diff := util.Diff(string(d), str); diff != "" {
 			t.Error(diff)
 		}
+	}
+}
 
+func TestStress(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+	ed := GetEditor()
+	w := ed.NewWindow()
+	defer w.Close()
+
+	v := w.OpenFile("../frontend/termbox/main.go", 0)
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	syntax := "../packages/go.tmbundle/Syntaxes/Go.tmLanguage"
+	v.Settings().Set("syntax", syntax)
+	for i := 0; i < 1000; i++ {
+		e := v.BeginEdit()
+		for i := 0; i < 100; i++ {
+			v.Insert(e, 0, "h")
+		}
+		for i := 0; i < 100; i++ {
+			v.Erase(e, Region{0, 1})
+		}
+		v.EndEdit(e)
+	}
+}
+
+func TestTransform(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	sc, err := textmate.LoadTheme("../packages/themes/TextMate-Themes/GlitterBomb.tmTheme")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v.Settings().Set("syntax", "textmate/testdata/Go.tmLanguage")
+
+	d, err := ioutil.ReadFile("view.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := v.BeginEdit()
+	v.Insert(e, 0, string(d))
+	v.EndEdit(e)
+
+	time.Sleep(time.Second)
+	a := v.Transform(sc, Region{0, 100}).Transcribe()
+	v.Transform(sc, Region{100, 200}).Transcribe()
+	c := v.Transform(sc, Region{0, 100}).Transcribe()
+	if !reflect.DeepEqual(a, c) {
+		t.Errorf("not equal:\n%v\n%v", a, c)
+	}
+}
+
+func BenchmarkTransformTranscribe(b *testing.B) {
+	b.StopTimer()
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	sc, err := textmate.LoadTheme("../packages/themes/TextMate-Themes/GlitterBomb.tmTheme")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	v.Settings().Set("syntax", "textmate/testdata/Go.tmLanguage")
+
+	d, err := ioutil.ReadFile("view.go")
+	if err != nil {
+		b.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	v.Settings().AddOnChange("benchmark", func(key string) {
+		if key == "lime.syntax.updated" {
+			wg.Done()
+		}
+	})
+	e := v.BeginEdit()
+	v.Insert(e, 0, string(d))
+	v.EndEdit(e)
+	wg.Wait()
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		v.Transform(sc, Region{0, v.Buffer().Size()}).Transcribe()
+	}
+	fmt.Println(util.Prof.String())
+}
+
+func TestSaveAsNewFile(t *testing.T) {
+	tests := []struct {
+		text   string
+		atomic bool
+		file   string
+	}{
+		{
+			"abc",
+			false,
+			"testdata/test",
+		},
+		{
+			"abc",
+			true,
+			"testdata/test",
+		},
+	}
+
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	for i, test := range tests {
+		v := w.NewFile()
+
+		v.Settings().Set("atomic_save", test.atomic)
+
+		e := v.BeginEdit()
+
+		v.Insert(e, 0, test.text)
+		v.EndEdit(e)
+		if err := v.SaveAs(test.file); err != nil {
+			t.Fatalf("Test %d: Can't save to `%s`: %s", i, test.file, err)
+		}
+
+		if v.IsDirty() {
+			t.Errorf("Test %d: Expected the view to be clean, but it wasn't")
+		}
+
+		data, err := ioutil.ReadFile(test.file)
+		if err != nil {
+			t.Fatalf("Test %d: Can't read `%s`: %s", i, test.file, err)
+		}
+		if string(data) != test.text {
+			t.Errorf("Test %d: Expected `%s` contain %s, but got %s", i, test.file, test.text, data)
+		}
+
+		v.Close()
+
+		if err = os.Remove(test.file); err != nil {
+			t.Errorf("Test %d: Couldn't remove test file %s", i, test.file)
+		}
+	}
+}
+
+func TestSaveAsOpenFile(t *testing.T) {
+	var testfile string = "testdata/Default.sublime-settings"
+
+	buf, err := ioutil.ReadFile(testfile)
+	if err != nil {
+		t.Fatalf("Can't read test file `%s`: %s", testfile, err)
+	}
+
+	tests := []struct {
+		atomic bool
+		as     string
+	}{
+		{
+			true,
+			"User.sublime-settings",
+		},
+		{
+			true,
+			"testdata/User.sublime-settings",
+		},
+		{
+			true,
+			"../User.sublime-settings",
+		},
+		{
+			true,
+			os.TempDir() + "/User.sublime-settings",
+		},
+		{
+			false,
+			"User.sublime-settings",
+		},
+		{
+			false,
+			"testdata/User.sublime-settings",
+		},
+	}
+
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	for i, test := range tests {
+		v := w.OpenFile(testfile, 0)
+
+		v.Settings().Set("atomic_save", test.atomic)
+		if err := v.SaveAs(test.as); err != nil {
+			t.Fatalf("Test %d: Can't save to `%s`: %s", i, test.as, err)
+		}
+
+		if v.IsDirty() {
+			t.Errorf("Test %d: Expected the view to be clean, but it wasn't")
+		}
+
+		if _, err := os.Stat(test.as); os.IsNotExist(err) {
+			t.Fatalf("Test %d: The file `%s` wasn't created", i, test.as)
+		}
+
+		data, err := ioutil.ReadFile(test.as)
+		if err != nil {
+			t.Fatalf("Test %d: Can't read `%s`: %s", i, test.as, err)
+		}
+		if string(data) != string(buf) {
+			t.Errorf("Test %d: Expected `%s` contain %s, but got %s", i, test.as, string(buf), data)
+		}
+
+		v.Close()
+
+		if err := os.Remove(test.as); err != nil {
+			t.Errorf("Test %d: Couldn't remove test file %s", i, test.as)
+		}
+	}
+}
+
+func TestClassify(t *testing.T) {
+	tests := []struct {
+		text   string
+		points []int
+		expect []int
+	}{
+		{
+			"",
+			[]int{0, 10},
+			[]int{3520, 3520},
+		},
+		{
+			"abc Hi -test lime,te-xt\n\tclassify test-ing",
+			[]int{0, 4, 5, 6, 7, 8, 13, 17, 18, 20, 21, 23, 24, 25, 34, 38, 39, 42},
+			[]int{73, 49, 512, 2, 1028, 9, 1, 8198, 4105, 6, 9, 130, 64, 1, 1, 6, 9, 134},
+		},
+		{
+			"(tes)ting cl][assify\n\npare(,,)nthe\\ses\n\t\n// Use",
+			[]int{0, 4, 12, 13, 14, 20, 21, 22, 26, 27, 28, 29, 30, 34, 35, 39, 40, 41, 42, 43, 44, 47},
+			[]int{5188, 8198, 8198, 12288, 4105, 130, 448, 65, 4102, 12288, 0, 12288, 8201, 6, 9, 64, 128, 1092, 0, 2056, 49, 134},
+		},
+	}
+
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	for i, test := range tests {
+		v := w.NewFile()
+		defer func() {
+			v.SetScratch(true)
+			v.Close()
+		}()
+
+		e := v.BeginEdit()
+		v.Insert(e, 0, test.text)
+		v.EndEdit(e)
+		for j, point := range test.points {
+			if res := v.Classify(point); test.expect[j] != res {
+				t.Errorf("Test %d: Expected %d from view.Classify(%d) but, got %d", i, test.expect[j], point, res)
+			}
+		}
+	}
+}
+
+func TestFindByClass(t *testing.T) {
+	tests := []struct {
+		text    string
+		point   int
+		forward bool
+		classes int
+		expect  int
+	}{
+		{
+			"abc Hi -test lime",
+			1,
+			true,
+			CLASS_PUNCTUATION_START,
+			7,
+		},
+		{
+			"abc Hi -test lime",
+			8,
+			true,
+			CLASS_PUNCTUATION_START,
+			17,
+		},
+		{
+			"abc Hi -test lime",
+			5,
+			true,
+			CLASS_WORD_START,
+			8,
+		},
+		{
+			"abc Hi -test lime",
+			5,
+			false,
+			CLASS_EMPTY_LINE,
+			0,
+		},
+		{
+			"abc Hi -test lime",
+			9,
+			false,
+			CLASS_SUB_WORD_START,
+			4,
+		},
+		{
+			"abc Hi -test lime",
+			9,
+			false,
+			CLASS_WORD_END | CLASS_PUNCTUATION_END,
+			8,
+		},
+		{
+			"abc Hi -test lime",
+			0,
+			true,
+			CLASS_WORD_START | CLASS_WORD_END,
+			3,
+		},
+	}
+
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	for i, test := range tests {
+		v := w.NewFile()
+		defer func() {
+			v.SetScratch(true)
+			v.Close()
+		}()
+
+		e := v.BeginEdit()
+		v.Insert(e, 0, test.text)
+		v.EndEdit(e)
+		if res := v.FindByClass(test.point, test.forward, test.classes); res != test.expect {
+			t.Errorf("Test %d: Expected %d from view.FindByClass but, got %d", i, test.expect, res)
+		}
+	}
+}
+
+func TestExpandByClass(t *testing.T) {
+	tests := []struct {
+		text    string
+		start   Region
+		classes int
+		expect  Region
+	}{
+		{
+			"abc Hi -test lime",
+			Region{1, 2},
+			CLASS_WORD_START,
+			Region{0, 4},
+		},
+		{
+			"abc Hi -test lime",
+			Region{8, 10},
+			CLASS_WORD_START | CLASS_WORD_END,
+			Region{6, 12},
+		},
+		{
+			"abc Hi -test lime",
+			Region{12, 14},
+			CLASS_PUNCTUATION_START,
+			Region{7, 17},
+		},
+		{
+			"abc Hi -test lime",
+			Region{12, 14},
+			CLASS_PUNCTUATION_END,
+			Region{8, 17},
+		},
+		{
+			"abc Hi -test lime",
+			Region{9, 11},
+			CLASS_WORD_START | CLASS_WORD_END,
+			Region{8, 12},
+		},
+	}
+
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	for i, test := range tests {
+		v := w.NewFile()
+		defer func() {
+			v.SetScratch(true)
+			v.Close()
+		}()
+
+		e := v.BeginEdit()
+		v.Insert(e, 0, test.text)
+		v.EndEdit(e)
+		if res := v.ExpandByClass(test.start, test.classes); res != test.expect {
+			t.Errorf("Test %d: Expected %v from view.ExpandByClass, but got %v", i, test.expect, res)
+		}
+	}
+}
+
+func TestSetBuffer(t *testing.T) {
+	var w Window
+
+	v := newView(&w)
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	b := NewBuffer()
+	b.SetName("test")
+
+	_ = v.setBuffer(b)
+
+	if v.buffer.Name() != b.Name() {
+		t.Errorf("Expected buffer called %s, but got %s", b.Name(), v.buffer.Name())
+	}
+}
+
+func TestSetBufferTwice(t *testing.T) {
+	var w Window
+
+	v := newView(&w)
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	b1 := NewBuffer()
+	b1.SetName("test1")
+
+	_ = v.setBuffer(b1)
+
+	b2 := NewBuffer()
+	b2.SetName("test2")
+
+	err := v.setBuffer(b2)
+
+	if err == nil {
+		t.Errorf("Expected setting the second buffer to cause an error, but it didn't.")
+	}
+
+	if v.buffer.Name() != b1.Name() {
+		t.Errorf("Expected buffer called %s, but got %s", b1.Name(), v.buffer.Name())
+	}
+}
+
+func TestWindow(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	if v.Window() != w {
+		t.Errorf("Expected the set window to be the one that spawned the view, but it isn't.")
+	}
+}
+
+func TestSetScratch(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	def := v.IsScratch()
+
+	v.SetScratch(!def)
+
+	if v.IsScratch() == def {
+		t.Errorf("Expected the view to be scratch = %v, but it was %v", !def, v.IsScratch())
+	}
+}
+
+func TestSetOverwriteStatus(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	def := v.OverwriteStatus()
+
+	v.SetOverwriteStatus(!def)
+
+	if v.OverwriteStatus() == def {
+		t.Errorf("Expected the view to be overwrite = %v, but it was %v", !def, v.OverwriteStatus())
+	}
+}
+
+func TestIsDirtyWhenScratch(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer v.Close()
+
+	v.SetScratch(true)
+
+	if v.IsDirty() {
+		t.Errorf("Expected the view not to be marked as dirty, but it was")
+	}
+}
+
+func TestIsDirtyWhenClean(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.OpenFile("testdata/Default.sublime-keymap", 0)
+	defer v.Close()
+
+	v.Save()
+
+	if v.IsDirty() {
+		t.Errorf("Expected the view not to be marked as dirty, but it was")
+	}
+}
+
+func TestIsDirtyWhenDirty(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	v.SetScratch(false)
+	v.buffer.Insert(0, "test")
+
+	if !v.IsDirty() {
+		t.Errorf("Expected the view to be marked as dirty, but it wasn't")
+	}
+}
+
+func TestCloseView(t *testing.T) {
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	l := len(w.Views())
+
+	v := w.OpenFile("testdata/Default.sublime-keymap", 0)
+
+	v.Save()
+	v.Close()
+
+	if len(w.Views()) != l {
+		t.Errorf("Expected %d views, but got %d", l, len(w.Views()))
+	}
+}
+
+func TestCloseView2(t *testing.T) {
+	const testfile = "testdata/Default.sublime-keymap"
+	fe := GetEditor().Frontend()
+	if dfe, ok := fe.(*DummyFrontend); ok {
+		// Make it trigger a reload
+		dfe.SetDefaultAction(true)
+	}
+
+	// Make sure a closed view isn't reloaded after it has been closed
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.OpenFile(testfile, 0)
+
+	v.SetScratch(true)
+	v.Close()
+
+	if data, err := ioutil.ReadFile(testfile); err != nil {
+		t.Errorf("Couldn't load file: %s", err)
+		return
+	} else if err = ioutil.WriteFile(testfile, data, 0644); err != nil {
+		t.Errorf("Couldn't save file: %s", err)
+		return
+	}
+}
+
+func TestViewLoadSettings(t *testing.T) {
+	LIME_USER_PACKAGES_PATH = path.Join("..", "packages")
+	LIME_USER_PACKETS_PATH = path.Join("..", "packages", "User")
+	LIME_PACKAGES_PATH = path.Join("..", "packages")
+	LIME_DEFAULTS_PATH = path.Join("..", "packages", "Default")
+
+	GetEditor().loadSettings()
+
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
+	if v.Settings().Get("translate_tabs_to_spaces", true).(bool) != false {
+		t.Error("Expected `translate_tabs_to_spaces` be false for a new view but is true")
+	}
+
+	v.Settings().Set("syntax", "../packages/python.tmbundle/Syntaxes/Python.tmLanguage")
+	if v.Settings().Get("translate_tabs_to_spaces", false).(bool) != true {
+		t.Error("Expected `translate_tabs_to_spaces` be true for python syntax but is false")
 	}
 }
 
 func BenchmarkScopeNameLinear(b *testing.B) {
-	var (
-		w Window
-		v = w.NewFile()
-	)
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
 	const (
 		in     = "textmate/language_test.go"
 		syntax = "textmate/testdata/Go.tmLanguage"
@@ -243,10 +901,15 @@ func BenchmarkScopeNameLinear(b *testing.B) {
 }
 
 func BenchmarkScopeNameRandom(b *testing.B) {
-	var (
-		w Window
-		v = w.NewFile()
-	)
+	w := GetEditor().NewWindow()
+	defer w.Close()
+
+	v := w.NewFile()
+	defer func() {
+		v.SetScratch(true)
+		v.Close()
+	}()
+
 	const (
 		in     = "textmate/language_test.go"
 		syntax = "textmate/testdata/Go.tmLanguage"

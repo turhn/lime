@@ -1,12 +1,19 @@
+// Copyright 2013 The lime Authors.
+// Use of this source code is governed by a 2-clause
+// BSD-style license that can be found in the LICENSE file.
+
 package textmate
 
 import (
-	"code.google.com/p/log4go"
 	"encoding/json"
 	"fmt"
+	"github.com/limetext/lime/backend/loaders"
+	"github.com/limetext/lime/backend/log"
+	"github.com/limetext/lime/backend/render"
+	"github.com/limetext/lime/backend/util"
 	"image/color"
 	"io/ioutil"
-	"lime/backend/loaders"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -41,10 +48,23 @@ func LoadTheme(filename string) (*Theme, error) {
 	return &scheme, nil
 }
 
+func (s ScopeSetting) String() (ret string) {
+	ret = fmt.Sprintf("%s - %s\n", s.Name, s.Scope)
+	keys := make([]string, 0, len(s.Settings))
+	for k := range s.Settings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		ret += fmt.Sprintf("\t\t%s: %s\n", k, s.Settings[k])
+	}
+	return
+}
+
 func (t Theme) String() (ret string) {
 	ret = fmt.Sprintf("%s - %s\n", t.Name, t.UUID)
 	for i := range t.Settings {
-		ret += fmt.Sprintf("\t%s\n", t.Settings[i])
+		ret += fmt.Sprintf("\t%s", t.Settings[i])
 	}
 	return
 }
@@ -56,7 +76,7 @@ func (c Color) String() string {
 func (c *Color) UnmarshalJSON(data []byte) error {
 	i64, err := strconv.ParseInt(string(data[2:len(data)-1]), 16, 64)
 	if err != nil {
-		log4go.Warn("Couldn't properly load color from %s: %s", string(data), err)
+		log.Warn("Couldn't properly load color from %s: %s", string(data), err)
 	}
 	c.A = uint8((i64 >> 24) & 0xff)
 	c.R = uint8((i64 >> 16) & 0xff)
@@ -74,18 +94,19 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 	for k, v := range tmp {
 		if strings.HasPrefix(k, "font") {
 			continue
-		} else {
-			var c Color
-			if err := json.Unmarshal(v, &c); err != nil {
-				return err
-			}
-			(*s)[k] = c
 		}
+		var c Color
+		if err := json.Unmarshal(v, &c); err != nil {
+			return err
+		}
+		(*s)[k] = c
 	}
 	return nil
 }
 
 func (t *Theme) ClosestMatchingSetting(scope string) *ScopeSetting {
+	pe := util.Prof.Enter("ClosestMatchingSetting")
+	defer pe.Exit()
 	na := scope
 	for len(na) > 0 {
 		sn := na
@@ -108,4 +129,30 @@ func (t *Theme) ClosestMatchingSetting(scope string) *ScopeSetting {
 		}
 	}
 	return &t.Settings[0]
+}
+
+func (t *Theme) Spice(vr *render.ViewRegions) (ret render.Flavour) {
+	pe := util.Prof.Enter("Spice")
+	defer pe.Exit()
+	if len(t.Settings) == 0 {
+		return
+	}
+	def := &t.Settings[0]
+
+	s := t.ClosestMatchingSetting(vr.Scope)
+	fg, ok := s.Settings["foreground"]
+	if !ok {
+		fg = def.Settings["foreground"]
+	}
+	ret.Foreground = render.Colour(fg)
+	bname := "background"
+	if vr.Flags&render.SELECTION != 0 {
+		bname = "selection"
+	}
+	bg, ok := s.Settings[bname]
+	if !ok {
+		bg = def.Settings[bname]
+	}
+	ret.Background = render.Colour(bg)
+	return
 }
